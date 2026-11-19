@@ -1,0 +1,42 @@
+icon: assets/icon.ico
+appId: com.sshworkbench.app
+productName: SSH Workbench
+directories:
+  output: release
+# node-pty 1.1.0 为 NAPI prebuild（prebuilds/win32-x64），node/electron ABI 通用，
+# 无需 @electron/rebuild 重编（其 headers 下载在本机网络环境 hang）；asarUnpack 已覆盖
+npmRebuild: false
+files:
+  - out/**
+asarUnpack:
+  - "**/*.node"
+  - node_modules/node-pty/**
+win:
+  target:
+    - nsis
+    - zip
+# v1.3 Linux（Ubuntu）打包：AppImage（免安装直跑）+ deb（系统包管理）。
+# icon-512.png 为程序化重绘（tools/gen-icon-512.mjs——原 icon.ico 最大真实像素帧
+# 仅 128，不满足 linux ≥256 下限）；electron-builder 会从 512 源自动生成全套
+# hicolor 尺寸。deb 元数据硬门槛：maintainer（含邮箱）+ package.json homepage。
+# 注意：linux 包必须在 Linux 环境构建（node_modules 的 node-pty 原生产物随宿主平台，
+# Windows 上交叉打 linux 包会打进 win32 二进制 → 运行时 require pty.node 失败）。
+linux:
+  icon: assets/icon-512.png
+  category: Development
+  maintainer: Liu Haitao <liuhaitao720@users.noreply.github.com>
+  executableName: ssh-workbench
+  syncDesktopName: true
+  target:
+    - AppImage
+    - deb
+extraResources:
+  - from: assets/icon.png
+    to: icon.png
+  # S7 cwb-server 交付包（npm run build:server 产出到 release/server-dist/）：
+  # manifest.json + server-<v>.tgz（含 Linux 编译 node-pty——O6：tgz 绑定构建机 ABI，
+  # 故 linux 包必须在 Linux 环境先跑 build:server 再打包）。win nsis/zip 与
+  # linux deb/AppImage 全 target 生效（extraResources 全局）。from 目录缺失时
+  # electron-builder 直接报错——先 npm run build:server。
+  - from: release/server-dist
+    to: server
