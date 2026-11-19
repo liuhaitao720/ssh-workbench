@@ -1,0 +1,129 @@
+import { readFileSync, renameSync, writeFileSync } from 'node:fs'
+import { join } from 'node:path'
+import type { TaskRecord } from '../shared/types'
+
+/**
+ * 任务记录持久化：baseDir/tasks.json。
+ * 原子写（.tmp + rename）；load 容错（缺失/损坏 → 空列表）。
+ * 构造注入 baseDir，模块不触碰 electron API（可测性）。
+ */
+export class TaskStore {
+  private readonly file: string
+
+  constructor(baseDir: string) {
+    this.file = join(baseDir, 'tasks.json')
+  }
+
+  /** projectId 省略 = 全部 */
+  list(projectId?: string): TaskRecord[] {
+    const all = this.load()
+    return projectId === undefined ? all : all.filter((t) => t.projectId === projectId)
+  }
+
+  get(id: string): TaskRecord | undefined {
+    return this.load().find((t) => t.id === id)
+  }
+
+  upsert(record: TaskRecord): TaskRecord {
+    const all = this.load()
+    const idx = all.findIndex((t) => t.id === record.id)
+    if (idx >= 0) all[idx] = record
+    else all.push(record)
+    this.save(all)
+    return record
+  }
+
+  remove(id: string): boolean {
+    const all = this.load()
+    const next = all.filter((t) => t.id !== id)
+    if (next.length === all.length) return false
+    this.save(next)
+    return true
+  }
+
+  /** 仅改 name 字段；不存在返回 undefined（由调用方决定报错语义） */
+  rename(id: string, name: string): TaskRecord | undefined {
+    const task = this.get(id)
+    if (!task) return undefined
+    return this.upsert({ ...task, name })
+  }
+
+  /**
+   * 应用启动归一：running → stopped（重启后本地 PTY 已死）。
+   * S4 分流（M11）：isRemote 返回 true 的任务（远程项目——project.connectionId
+   * 非空）**不归一**——远端 PTY 由 cwb-server 保活（5.9=b），保持 running 语义，
+   * 重连后按 5.6 自动恢复视图（S6 store 消费 ConnectionStateChanged）。
+   */
+  normalizeOnStartup(isRemote?: (task: TaskRecord) => boolean): void {
+    const all = this.load()
+    let changed = false
+    for (const task of all) {
+      if (task.status === 'running' && isRemote?.(task) !== true) {
+        task.status = 'stopped'
+        changed = true
+      }
+    }
+    if (changed) this.save(all)
+  }
+
+  private load(): TaskRecord[] {
+    try {
+      const parsed: unknown = JSON.parse(readFileSync(this.file, 'utf8'))
+      return Array.isArray(parsed) ? (parsed as TaskRecord[]) : []
+    } catch {
+      return []
+    }
+  }
+
+  private save(records: TaskRecord[]): void {
+    const tmp = `${this.file}.tmp`
+    writeFileSync(tmp, JSON.stringify(records, null, 2), 'utf8')
+    renameSync(tmp, this.file)
+  }
+}
+
+/**
+ * 已删任务会话墓碑（v2.2.1）：baseDir/deleted-sessions.json。
+ * 用户删除任务后其 claude 会话 jsonl 仍留在磁盘/VM（~/.claude/projects），
+ * 连接成功的增量导入（runDeferredImports）与「导入历史会话」会把它当新会话
+ * 重新拉回——实测「删掉的任务重连后又显示出来」。墓碑按 sessionId（===
+ * 任务 id，types.ts 契约）记录删除意图，导入侧跳过（session-import opts）。
+ * 原子写与 TaskStore 同配方；load 容错（缺失/损坏 → 空表）；不设上限
+ * （条目=uuid 字符串，量级可忽略）。
+ */
+export class SessionTombstoneStore {
+  private readonly file: string
+
+  constructor(baseDir: string) {
+    this.file = join(baseDir, 'deleted-sessions.json')
+  }
+
+  all(): string[] {
+    return this.load()
+  }
+
+  has(sessionId: string): boolean {
+    return this.load().includes(sessionId)
+  }
+
+  add(sessionId: string): void {
+    const all = this.load()
+    if (all.includes(sessionId)) return
+    this.save([...all, sessionId])
+  }
+
+  private load(): string[] {
+    try {
+      const parsed: unknown = JSON.parse(readFileSync(this.file, 'utf8'))
+      return Array.isArray(parsed) ? parsed.filter((v): v is string => typeof v === 'string') : []
+    } catch {
+      return []
+    }
+  }
+
+  private save(entries: string[]): void {
+    const tmp = `${this.file}.tmp`
+    writeFileSync(tmp, JSON.stringify(entries, null, 2), 'utf8')
+    renameSync(tmp, this.file)
+  }
+}
